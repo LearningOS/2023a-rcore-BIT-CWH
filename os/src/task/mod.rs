@@ -14,12 +14,15 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::config::MAX_APP_NUM;
+
+use crate::config::{MAX_APP_NUM, MAX_SYSCALL_NUM};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
+pub use crate::syscall::process::TaskInfo;
 
 pub use context::TaskContext;
 
@@ -54,6 +57,9 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            syscall_times: [0; MAX_SYSCALL_NUM],
+            dispatch_times: 0,
+            first_dispatch_time: 0
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -83,6 +89,7 @@ impl TaskManager {
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
+        self.record_time();
         // before this, we should drop local variables that must be dropped manually
         unsafe {
             __switch(&mut _unused as *mut TaskContext, next_task_cx_ptr);
@@ -126,6 +133,7 @@ impl TaskManager {
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
+           self.record_time();
             // before this, we should drop local variables that must be dropped manually
             unsafe {
                 __switch(current_task_cx_ptr, next_task_cx_ptr);
@@ -135,6 +143,39 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+    ///Update system call record 
+    fn update_syscall_record(&self, id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[id] += 1;
+        drop(inner);
+    }
+    ///返回TaskInfo
+    pub fn show_info(&self) -> TaskInfo {
+        let current = self.inner.exclusive_access().current_task;
+        let  inner = self.inner.exclusive_access();
+        TaskInfo {
+            status: TaskStatus::Running,
+            syscall_times: inner.tasks[current].syscall_times.clone(),
+            time: get_time_ms() - inner.tasks[current].first_dispatch_time
+        }
+    }
+    ///记录调度时间与次数,0记录时间
+    pub fn record_time(&self) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        match inner.tasks[current].dispatch_times {
+            0 => {
+                inner.tasks[current].dispatch_times += 1;
+                inner.tasks[current].first_dispatch_time = get_time_ms()
+            }
+            _ => {
+
+            }
+        }
+        drop(inner)
+    }
+    
 }
 
 /// Run the first task in task list.
@@ -168,4 +209,9 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+///Record system call
+pub fn record_syscall(syscall_id: usize) {
+    TASK_MANAGER.update_syscall_record(syscall_id);
 }
