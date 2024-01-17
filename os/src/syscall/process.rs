@@ -28,25 +28,6 @@ pub struct TaskInfo {
     pub time: usize,
 }
 
-///New
-impl TaskInfo {
-    ///初始化为0
-    pub fn zero_init() -> Self {
-        Self {
-            status: TaskStatus::Running,
-            syscall_times: [0; MAX_SYSCALL_NUM],
-            time: 0
-        }
-    }
-    ///更新记录
-    pub fn update_times(&mut self, id: usize) {
-        self.syscall_times[id] += 1;
-    }
-    ///更新距离第一次调度的时间
-    pub fn update_time_range(&mut self, time:usize) {
-        self.time = time;
-    }
-}
 
 /// task exits and submit an exit code
 pub fn sys_exit(exit_code: i32) -> ! {
