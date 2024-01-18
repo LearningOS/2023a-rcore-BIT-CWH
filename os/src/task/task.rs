@@ -11,7 +11,7 @@ pub struct TaskControlBlock {
     pub task_status: TaskStatus,
     /// The task context
     pub task_cx: TaskContext,
-    ///The task information
+    ///各系统调用被调用次数
     pub syscall_times: [u32; MAX_SYSCALL_NUM],
     ///调度次数
     pub dispatch_times: usize,
