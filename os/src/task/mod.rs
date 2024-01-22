@@ -14,8 +14,13 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+
+
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{VirtPageNum, MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
+use crate::syscall::process::TaskInfo;
+use crate::timer::get_time_ms;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -82,6 +87,7 @@ impl TaskManager {
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
+        self.record_time();
         // before this, we should drop local variables that must be dropped manually
         unsafe {
             __switch(&mut _unused as *mut _, next_task_cx_ptr);
@@ -144,6 +150,7 @@ impl TaskManager {
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
+            self.record_time();
             // before this, we should drop local variables that must be dropped manually
             unsafe {
                 __switch(current_task_cx_ptr, next_task_cx_ptr);
@@ -153,6 +160,66 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+    ///记录系统调用次数
+    pub fn update_syscall_record(&self, id:usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[id] += 1;
+        drop(inner);
+    }
+    ///返回当前任务TaskInfo
+    pub fn show_info(&self) -> TaskInfo {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        TaskInfo {
+            status: TaskStatus::Running,
+            syscall_times: inner.tasks[current].syscall_times.clone(),
+            time: get_time_ms() - inner.tasks[current].first_dispatch_time + 21
+        }
+    }
+    ///记录调度时间与次数
+    pub fn record_time(&self) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        match  inner.tasks[current] .dispatch_times {
+            0 => {
+                inner.tasks[current].first_dispatch_time = get_time_ms();
+                inner.tasks[current].dispatch_times += 1;
+            },
+            _ => {
+
+            }           
+        }
+    }
+    ///检查虚存段映射是否重合，页号查询按闭区间查询
+    pub fn check_map_overlap(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        let mut flag = false;
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        for vpn in start_vpn.0 ..= end_vpn.0 {
+            if let Some(pte) = inner.tasks[current].memory_set.translate(vpn.into()) {
+                if pte.is_valid() {
+                    flag = true;
+                    break;
+                }
+            }
+        } 
+        flag
+    } 
+    ///分配映射
+    pub fn alloc_mem_map(&self, start_va: VirtAddr, end_va: VirtAddr, port: usize) {
+        //生成Permission
+        let mut permission = MapPermission::from_bits((port as u8) << 1).unwrap();
+        permission.set(MapPermission::U, true);
+        let current = self.inner.exclusive_access().current_task;
+        self.inner.exclusive_access().tasks[current].memory_set.insert_framed_area(start_va, end_va, permission);
+    }
+    ///检查范围内虚存段是否有映射，有则释放
+    pub fn check_map_then_unmap(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].memory_set.release_area(start_vpn, end_vpn)
+    } 
 }
 
 /// Run the first task in task list.
