@@ -43,10 +43,17 @@ const SYSCALL_TASK_INFO: usize = 410;
 mod fs;
 mod process;
 
+
 use fs::*;
 use process::*;
+pub use process::TaskInfo;
+
+use crate::task::current_task;
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    let current_task = current_task().unwrap();
+    current_task.record_syscall(syscall_id);
+    drop(current_task);
     match syscall_id {
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),

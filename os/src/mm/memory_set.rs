@@ -32,8 +32,10 @@ lazy_static! {
 }
 /// address space
 pub struct MemorySet {
-    page_table: PageTable,
-    areas: Vec<MapArea>,
+    ///页表
+    pub page_table: PageTable,
+    ///段
+    pub areas: Vec<MapArea>,
 }
 
 impl MemorySet {
@@ -300,6 +302,18 @@ impl MemorySet {
             false
         }
     }
+    ///检测区域映射并解除
+    pub fn release_area(&mut self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> isize {
+        let mut flag = -1;
+        for i in 0..self.areas.len() {
+            if  self.areas[i].match_area(start_vpn, end_vpn){
+               flag = 0 ;
+                self.remove_area_with_start_vpn(start_vpn);
+                break;
+            }
+        }
+        flag
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -399,6 +413,10 @@ impl MapArea {
             }
             current_vpn.step();
         }
+    }
+    ///区域匹配
+    pub fn match_area(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        start_vpn.0 == self.vpn_range.get_start().0 && end_vpn.0 == self.vpn_range.get_end().0
     }
 }
 

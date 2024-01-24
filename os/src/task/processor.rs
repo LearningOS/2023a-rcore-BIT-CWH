@@ -5,7 +5,7 @@
 //! and the replacement and transfer of control flow of different applications are executed.
 
 use super::__switch;
-use super::{fetch_task, TaskStatus};
+use super::{fetch_task_by_stride, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
@@ -55,7 +55,8 @@ lazy_static! {
 pub fn run_tasks() {
     loop {
         let mut processor = PROCESSOR.exclusive_access();
-        if let Some(task) = fetch_task() {
+        //Stride优先级调度算法
+        if let Some(task) = fetch_task_by_stride() {
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
@@ -63,6 +64,8 @@ pub fn run_tasks() {
             task_inner.task_status = TaskStatus::Running;
             // release coming task_inner manually
             drop(task_inner);
+            //记录调度信息
+            task.record_dispatch_times();
             // release coming task TCB manually
             processor.current = Some(task);
             // release processor manually

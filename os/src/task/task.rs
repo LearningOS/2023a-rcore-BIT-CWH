@@ -1,13 +1,17 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
-use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use super::{pid_alloc, KernelStack, PidHandle};
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
+use crate::mm::{MapPermission, MemorySet, PhysPageNum, VirtAddr, VirtPageNum, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::syscall::TaskInfo;
+use crate::timer::get_time_ms;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+
+pub use super::kstack_alloc;
 
 /// Task control block structure
 ///
@@ -33,6 +37,69 @@ impl TaskControlBlock {
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
+    }
+    ///记录系统调用
+    pub fn record_syscall(&self, id: usize) {
+        //判断系统调用是否合法
+        if id < MAX_SYSCALL_NUM {
+            let mut inner = self.inner_exclusive_access();
+            inner.syscall_times[id] += 1;
+            drop(inner)
+        }
+    }
+    ///记录调用次数和初次调度时间
+    pub fn record_dispatch_times(&self) {
+        let mut inner = self.inner_exclusive_access();
+        match inner.dispatch_times {
+            0 => {
+                inner.first_dispatch_time = get_time_ms();
+            },
+            _ => {
+
+            }
+        }
+        inner.dispatch_times += 1;
+        drop(inner);
+    }
+    /// 返回TaskInfo
+    pub fn show_info(&self) -> TaskInfo{
+        let inner = self.inner_exclusive_access();
+        let info = TaskInfo {
+            status: TaskStatus::Running,
+            syscall_times: inner.syscall_times.clone(),
+            time: get_time_ms() - inner.first_dispatch_time + 21
+        };
+        drop(inner);
+        info
+    }
+
+    ///确认虚存段是否被映射，左闭右开
+    pub fn check_map_overlap(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        let mut flag = false;
+        let inner = self.inner_exclusive_access();
+        for vpn in start_vpn.0 .. end_vpn.0 {
+            if let Some(pte) = inner.memory_set.translate(vpn.into()) {
+                if pte.is_valid() {
+                    flag = true;
+                    break;
+                }
+            }
+        }
+        drop(inner);
+        flag
+    }
+
+    ///分配内存
+    pub fn alloc_mem_map(&self, start_va: VirtAddr, end_va: VirtAddr, port: usize) {
+        //生成Permission
+        let mut permission = MapPermission::from_bits((port as u8) << 1).unwrap();
+        permission.set(MapPermission::U, true);
+        self.inner_exclusive_access().memory_set.insert_framed_area(start_va, end_va, permission);
+    }
+
+    ///检查区域是否被映射并解除映射
+    pub fn check_map_then_unmap(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> isize {
+        self.inner_exclusive_access().memory_set.release_area(start_vpn, end_vpn)
     }
 }
 
@@ -68,6 +135,21 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    ///记录各系统调用调度次数
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+    
+    ///记录任务被调度次数
+    pub dispatch_times: usize,
+
+    /// 记录当前taskinfo查询距离首次被调度时间
+    pub first_dispatch_time: usize,
+
+    ///优先级
+    pub priority: usize,
+    
+    ///当前stride
+    pub stride: usize
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +200,11 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    dispatch_times: 0,
+                    first_dispatch_time: 0,
+                    priority: 16,
+                    stride: 0
                 })
             },
         };
@@ -191,6 +278,11 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    dispatch_times: 0,
+                    first_dispatch_time: 0,
+                    priority: 16,
+                    stride: 0
                 })
             },
         });
@@ -204,6 +296,54 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    ///生成执行data的进程，并返回进程的pid
+    pub fn spawn (self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        //获取父进程inner
+        let mut parent_inner = self.inner.exclusive_access();
+        //生成应用空间memory_set
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let trap_cx_ppn = memory_set.translate(VirtAddr::from(TRAP_CONTEXT_BASE).into()).unwrap().ppn();
+        //分配pid和内核栈
+        let pid_handle = pid_alloc();
+        let kernel_stack = kstack_alloc();
+        let kernel_stack_top = kernel_stack.get_top();
+        let task_control_block = Arc::new(TaskControlBlock{
+            pid: pid_handle,
+            kernel_stack,
+            inner: unsafe {
+                UPSafeCell::new(TaskControlBlockInner{
+                    trap_cx_ppn,
+                    base_size: user_sp,
+                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                    task_status: TaskStatus::Ready,
+                    memory_set,
+                    parent: Some(Arc::downgrade(self)),
+                    children: Vec::new(),
+                    exit_code: 0,
+                    heap_bottom: user_sp,
+                    program_brk: user_sp,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    dispatch_times: 0,
+                    first_dispatch_time: 0,
+                    priority: 16,
+                    stride: 0
+                })
+            }
+        });
+        //加入父进程的列表
+        parent_inner.children.push(task_control_block.clone());
+        //初始化trap_cx
+        let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+        *trap_cx = TrapContext::app_init_context(
+            entry_point,
+            user_sp,
+            KERNEL_SPACE.exclusive_access().token(),
+            kernel_stack_top,
+            trap_handler as usize
+        );
+        task_control_block
     }
 
     /// get pid of process
@@ -236,6 +376,7 @@ impl TaskControlBlock {
             None
         }
     }
+
 }
 
 #[derive(Copy, Clone, PartialEq)]
