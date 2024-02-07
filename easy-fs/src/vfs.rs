@@ -30,7 +30,7 @@ impl Inode {
         }
     }
     /// Call a function over a disk inode to read it
-    fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
+    pub fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
         get_block_cache(self.block_id, Arc::clone(&self.block_device))
             .lock()
             .read(self.block_offset, f)
@@ -182,5 +182,97 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+
+    ///linkat
+    pub fn linkat(&self, old_name: &str, new_name: &str) -> isize {
+        //互斥访问fs
+        let mut fs = self.fs.lock();
+        //判断老索引节点是否存在
+        let inode_id = self.read_disk_inode(|root_inode| {
+            self.find_inode_id(old_name, root_inode)
+        });
+        if inode_id.is_none() {
+            return -1;
+        }
+        let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id.unwrap());
+        //修改引用计数
+        get_block_cache(block_id as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(block_offset, |inode: &mut DiskInode| {
+                inode.link_num += 1;
+            });
+        //创建新目录项
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            self.increase_size( new_size as u32, root_inode, &mut fs);
+            let dirent = DirEntry::new(new_name, inode_id.unwrap());
+            root_inode.write_at(
+                file_count * DIRENT_SZ, 
+                &dirent.as_bytes(),
+                &self.block_device)
+        });
+        block_cache_sync_all();
+        0
+    }
+
+    ///unlinkat
+    pub fn unlinkat(&self, name: &str) -> isize{
+        let mut fs = self.fs.lock();
+        let mut inode_id: Option<u32> = None;
+        let mut v: Vec<DirEntry> = Vec::new();
+    
+        // 获取目标dirent
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            for i in 0..file_count {
+                let mut dirent = DirEntry::empty();
+                assert_eq!(
+                    root_inode.read_at(i * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device,),
+                    DIRENT_SZ,
+                );
+                if dirent.name() != name {
+                    v.push(dirent);
+                } else {
+                    inode_id = Some(dirent.inode_id());
+                }
+            }
+        });
+    
+        // 重置目录块
+        self.modify_disk_inode(|root_inode| {
+            let size = root_inode.size;
+            let data_blocks_dealloc = root_inode.clear_size(&self.block_device);
+            assert!(data_blocks_dealloc.len() == DiskInode::total_blocks(size) as usize);
+            for data_block in data_blocks_dealloc.into_iter() {
+                fs.dealloc_data(data_block);
+            }
+            self.increase_size((v.len() * DIRENT_SZ) as u32, root_inode, &mut fs);
+            for (i, dirent) in v.iter().enumerate() {
+                root_inode.write_at(i * DIRENT_SZ, dirent.as_bytes(), &self.block_device);
+            }
+        });
+        if inode_id.is_none() {
+            return -1;
+        }
+        //获取原节点信息
+        let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id.unwrap());
+        //修改原disknode
+        get_block_cache(block_id as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(block_offset, |n: &mut DiskInode| {
+                n.link_num -= 1;
+                if n.link_num == 0 {
+                    let size = n.size;
+                    let data_blocks_dealloc = n.clear_size(&self.block_device);
+                    assert!(data_blocks_dealloc.len() == DiskInode::total_blocks(size) as usize);
+                    for data_block in data_blocks_dealloc.into_iter() {
+                        fs.dealloc_data(data_block);
+                    }
+                }
+            });
+        block_cache_sync_all();
+        0
     }
 }

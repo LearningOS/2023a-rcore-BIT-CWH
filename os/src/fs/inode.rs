@@ -11,8 +11,9 @@ use crate::sync::UPSafeCell;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitflags::*;
-use easy_fs::{EasyFileSystem, Inode};
+use easy_fs::{EasyFileSystem, Inode, DiskInodeType};
 use lazy_static::*;
+use super::StatMode;
 
 /// inode in memory
 /// A wrapper around a filesystem inode
@@ -54,7 +55,9 @@ impl OSInode {
     }
 }
 
+
 lazy_static! {
+    ///ROOT_INODE
     pub static ref ROOT_INODE: Arc<Inode> = {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
@@ -154,5 +157,16 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn state(&self, st: &mut super::Stat) -> isize {
+        let inner = self.inner.exclusive_access();
+        inner.inode.read_disk_inode(|disk_inode| {
+            st.mode = match disk_inode.type_ {
+                DiskInodeType::File => StatMode::FILE,
+                DiskInodeType::Directory => StatMode::DIR,
+            };
+            st.nlink = disk_inode.link_num as u32;
+        });
+        0
     }
 }
