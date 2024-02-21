@@ -52,4 +52,14 @@ impl Semaphore {
             block_current_and_run_next();
         }
     }
+
+    ///show count
+    pub fn show_count(&self) -> usize{
+        let inner = self.inner.exclusive_access();
+        if inner.count <= 0 {
+            0
+        } else {
+            inner.count as usize
+        }
+    }
 }

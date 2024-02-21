@@ -27,6 +27,8 @@ pub struct ProcessControlBlock {
 pub struct ProcessControlBlockInner {
     /// is zombie?
     pub is_zombie: bool,
+    ///enbale deadlock detect
+    pub enable_detect: bool,
     /// memory set(address space)
     pub memory_set: MemorySet,
     /// parent process
@@ -49,6 +51,12 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// semaphore alloc metrix
+    pub semaphore_alloc: Vec<Vec<i32>>,
+    /// semaphore need metrix
+    pub semaphore_need: Vec<Vec<i32>>,
+    /// vec of thread state
+    pub is_threads_finish: Vec<bool>
 }
 
 impl ProcessControlBlockInner {
@@ -82,6 +90,15 @@ impl ProcessControlBlockInner {
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
     }
+    /// generate work vec
+    pub fn generate_work_vec(&self) -> Vec<usize> {
+        let mut work: Vec<usize> = Vec::new();
+        for _sem_id in 0..self.semaphore_list.len() {
+            //println!("{}:{}",current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid, _sem_id);
+            work.push(self.semaphore_list[_sem_id].as_ref().unwrap().show_count());
+        }
+        work
+    }
 }
 
 impl ProcessControlBlock {
@@ -101,6 +118,7 @@ impl ProcessControlBlock {
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    enable_detect: false,
                     memory_set,
                     parent: None,
                     children: Vec::new(),
@@ -119,6 +137,9 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    semaphore_alloc: Vec::new(),
+                    semaphore_need: Vec::new(),
+                    is_threads_finish: Vec::new()
                 })
             },
         });
@@ -144,6 +165,10 @@ impl ProcessControlBlock {
         // add main thread to the process
         let mut process_inner = process.inner_exclusive_access();
         process_inner.tasks.push(Some(Arc::clone(&task)));
+        // 银行家算法
+        process_inner.semaphore_alloc.push(Vec::new());
+        process_inner.semaphore_need.push(Vec::new());
+        process_inner.is_threads_finish.push(false);
         drop(process_inner);
         insert_into_pid2process(process.getpid(), Arc::clone(&process));
         // add main thread to scheduler
@@ -234,6 +259,7 @@ impl ProcessControlBlock {
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    enable_detect: false,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -245,6 +271,9 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    semaphore_alloc: Vec::new(),
+                    semaphore_need: Vec::new(),
+                    is_threads_finish: Vec::new()
                 })
             },
         });
